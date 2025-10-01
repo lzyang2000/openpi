@@ -4,6 +4,3 @@
 [submodule "third_party/libero"]
 	path = third_party/libero
 	url = https://github.com/Lifelong-Robot-Learning/LIBERO.git
-[submodule "third_party/mhw"]
-	path = third_party/mhw
-	url = git@github.com:Caltech-AMBER/mhw.git
