@@ -80,7 +80,7 @@ def save_state(
         train_state, params = _split_params(state)
     items = {
         "assets": save_assets,
-        "train_state": train_state,
+        # "train_state": train_state,  # [DEBUG] this causes hanging on save
         "params": {"params": params},
     }
     checkpoint_manager.save(step, items)
