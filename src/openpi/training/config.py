@@ -19,6 +19,7 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.h5_policy as h5_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -445,6 +446,51 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
         )
         model_transforms = ModelTransformFactory()(model_config)
 
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotDowDataConfig(DataConfigFactory):
+    """Custom config for Dow dataset in LeRobot format."""
+
+    extra_delta_transform: bool = False  # absolute EE actions instead of deltas, but not easy to convert so ignore
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[h5_policy.H5Inputs(model_type=model_config.model_type)],
+            outputs=[h5_policy.H5Outputs()],
+        )
+
+        # [NOTE] the data are in absolute end-effector space, so we hope that just finetuning on this space will work
+        # even though the original model was trained on delta actions.
+        # if self.extra_delta_transform:
+        #     delta_action_mask = _transforms.make_bool_mask(7, -1)  # apply to the first 7 actions, leave gripper same
+        #     data_transforms = data_transforms.push(
+        #         inputs=[_transforms.DeltaActions(delta_action_mask)],  # our data is in end-effector space (SE(3))!
+        #         outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        #     )
+
+        model_transforms = ModelTransformFactory()(model_config)
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
@@ -960,6 +1006,29 @@ _CONFIGS = [
     # RoboArena configs.
     #
     *roboarena_config.get_roboarena_configs(),
+    #
+    # DOW CONFIGS
+    #
+    TrainConfig(
+        name="pi05_dow_finetune",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=16, discrete_state_input=False),
+        data=LeRobotDowDataConfig(
+            repo_id="local/one_cup_rand_new_full_picks",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
