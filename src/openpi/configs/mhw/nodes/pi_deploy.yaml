@@ -18,7 +18,7 @@ pi_deployment_node:
     resolution: "vga"
     fps: 60
   fr3_buffer_len: 100
-  history_len: 2  # (history_len - 1) * dt_policy seconds of history
+  history_len: 1  # (history_len - 1) * dt_policy seconds of history
   name: "pi_deployment_node"
   domain_id: ???
   auto_start: true
@@ -26,5 +26,3 @@ pi_deployment_node:
     active: false
   subscriber_health_check_settings:
     active: false
-
-

@@ -14,6 +14,7 @@ from openpi.policies import droid_policy
 from openpi.policies import policy_config as _policy_config
 from openpi.shared import download
 from openpi.training import config as _config
+from openpi_client import image_tools
 import time
 import cv2
 PSTSettingT = list[dict[str, Any]]
@@ -92,6 +93,7 @@ class PiDemoDeploymentNode(AbstractDeploymentNode):
         dt_plan: float,
         zed_settings: dict[str, Any],
         oak_settings: dict[str, Any],
+        ckpt_path: str = "checkpoints/pi05_dow_finetune/dow_finetune_9_30/12000",
         device: str = "cuda",
         fr3_buffer_len: int = 100,
         history_len: int = 5,
@@ -109,6 +111,7 @@ class PiDemoDeploymentNode(AbstractDeploymentNode):
             dt_plan: Time interval between policy planning in seconds.
             zed_settings: Settings for the ZED camera. Must include 'serial_number' and 'buffer_len'.
             oak_settings: Settings for the OAK camera. Must include 'serial_number' and 'buffer_len'.
+            ckpt_path: Path to the model checkpoint.
             device: The device to run the policy on.
             fr3_buffer_len: Length of the FR3 data buffer.
             history_len: Length of the history to use for the policy, including current measurement. We assume
@@ -134,12 +137,14 @@ class PiDemoDeploymentNode(AbstractDeploymentNode):
         self.dt_policy = dt_policy
         self.dt_plan = dt_plan
         self.action_buffer = []  # actions are popped off the front of the queue
-        self.pi_config = _config.get_config("pi05")
-        self.checkpoint_dir = download.maybe_download("gs://openpi-assets/checkpoints/pi05_base")
+        self.pi_config = _config.get_config("pi05_dow_finetune")
+        # self.checkpoint_dir = download.maybe_download("gs://openpi-assets/checkpoints/pi05_base")
+        self.checkpoint_dir = ckpt_path
         self.policy = _policy_config.create_trained_policy(
             self.pi_config,
             self.checkpoint_dir,
         )
+
         # cameras
         self.zed_camera = self._init_zed(zed_settings)
         self.oak_camera = self._init_oak(oak_settings)
@@ -166,12 +171,6 @@ class PiDemoDeploymentNode(AbstractDeploymentNode):
         self.home_robot()
 
         print("Ready to start deployment. Press 'r' to start, 's' to stop and home, 'q' to quit.")
-
-        # [DEBUG]
-        # ############################################################################################
-        # from hydra.utils import instantiate
-        # self.dataset = instantiate(self.cfg.dataset, _convert_="all")
-        # ############################################################################################
 
     def _init_zed(self, zed_settings: dict[str, Any]) -> SingleZEDCamera:
         """Initialize the ZED camera with the given settings."""
@@ -376,8 +375,10 @@ class PiDemoDeploymentNode(AbstractDeploymentNode):
         x_ee_history = all_history["fr3"]["x_ee"][0]  # (7,)
         v_ee_history = all_history["fr3"]["v_ee"][0]  # (6,)
         gripper_history = all_history["fr3"]["gripper"][0]  # (1,)
+
         # map gripper_history from [-1, 1] to [0, 1]
-        gripper_history = (gripper_history + 1) / 2
+        # gripper_history = (gripper_history + 1) / 2
+
         zed_history = all_history["zed"]["bgra"][0]  # (H, W, 4)
         oak_history = all_history["oak"]["bgr"][0]  # (H, W, 3)
 
@@ -401,61 +402,28 @@ class PiDemoDeploymentNode(AbstractDeploymentNode):
         # zed_history_rgb_c_first = np.transpose(zed_history_rgb, (0, 3, 1, 2))  # (history_len, 3, H, W)
         # oak_history_rgb_c_first = np.transpose(oak_history_rgb, (0, 3, 1, 2))  # (history_len, 3, H, W)
 
-        # center crop to img_crop_size=(H=240, W=320)
-        # TODO: expose these settings or don't center crop during raw data collection
+        # resize in the way that openpi expects/does it during training
         H, W = zed_history_rgb.shape[0], zed_history_rgb.shape[1]
-        H_crop, W_crop = 224, 224
-        h_start = (H - H_crop) // 2
-        w_start = (W - W_crop) // 2
-        zed_history_rgb = zed_history_rgb[h_start : h_start + H_crop, w_start : w_start + W_crop, :]
-        oak_history_rgb = oak_history_rgb[h_start : h_start + H_crop, w_start : w_start + W_crop, :]
-
+        state = np.concatenate((q_history, gripper_history[None]), axis=-1)   # (8,)
         command = {}
-        command['observation/exterior_image_1_left'] = zed_history_rgb.astype(np.float32) / 255.0
-        command['observation/wrist_image_left'] = oak_history_rgb.astype(np.float32) / 255.0
-        command['observation/joint_position'] = q_history.astype(np.float32)
-        command['observation/gripper_position'] = gripper_history.astype(np.float32)
-        command['prompt'] = "sdfsdf"
-        start_time = time.time()
+        command['observation/image'] = image_tools.resize_with_pad(
+            zed_history_rgb.astype(np.float32) / 255.0, H, W,
+        )
+        command['observation/wrist_image'] = image_tools.resize_with_pad(
+            oak_history_rgb.astype(np.float32) / 255.0, H, W,
+        )
+        command['observation/state'] = state.astype(np.float32)
+        command['prompt'] = "<control_mode> end effector </control_mode> Pick the clear cup up and center it on a peg in the blue receptacle."
+
+        # [DEBUG]
+        # #########################################################################################
+        # start_time = time.time()
         action_chunk = self.policy.infer(command)["actions"]
-        end_time = time.time()
-        print("Inferred action chunk:", action_chunk[0])
-        print("Inference time:", end_time - start_time)
-        # raw_dict = {
-        #     "action": None,
-        #     "lowdim": torch.tensor(
-        #         full_lowdim_obs[None, ...], device=self.policy.device, dtype=torch.float32
-        #     ),  # (1, history_len, 28 or 36)
-        #     "image": torch.tensor(
-        #         images[None, ...], device=self.policy.device, dtype=torch.float32
-        #     ),  # (1, history_len, 2, 3, H, W)
-        #     "action_history": torch.tensor(
-        #         action_history_full[None, ...], device=self.policy.device, dtype=torch.float32
-        #     ),
-        # }
-        # processed_dict = self.policy.processor(raw_dict)  # type: ignore
-        # condition_cfg = processed_dict["condition_cfg"]
+        # end_time = time.time()
+        # print("Inferred action chunk:", action_chunk[0])
+        # print("Inference time:", end_time - start_time)
+        # #########################################################################################
 
-        # 3. run the policy to get the action output
-        # TODO: measure the policy latency and make sure it's not egregious
-        # with torch.no_grad():
-        #     pass
-            # prior = torch.zeros((1, self.Ta, self.action_dim), device=self.policy.device)
-            # pred_norm, _ = self.policy.sample(
-            #     prior,
-            #     solver="ddpm",
-            #     sample_steps=20,
-            #     condition_cfg=condition_cfg,
-            #     w_cfg=1.0,
-            # )
-            # actions = self.policy.processor.denormalize_action(pred_norm).detach().cpu().numpy()[0]  # type: ignore
-
-        # normalize the quaternion elements and make the gripper command -1 and 1
-        # actions[:, 3:7] /= np.linalg.norm(actions[:, 3:7], axis=-1, keepdims=True) + 1e-8
-        # actions[:, -1] = np.sign(actions[:, -1])  # (Ta, 8)
-
-        # # 4. fill the action buffer
-        # self.action_buffer = list(actions)  # overwrite current buffer
         # action_chunk is ndaray of shape (horizon, 8), turn it into list and overwrite current buffer
         self.action_buffer = list(action_chunk)
 
@@ -469,20 +437,21 @@ class PiDemoDeploymentNode(AbstractDeploymentNode):
             self.action = self.action_buffer.pop(0)
             x_ee_des = self.action[:7]
             gripper_des = 1 if self.action[7] > 0.2 else -1
-            q_home = np.array([0.0, -0.7854, 0.0, -2.3562, 0.0, 1.5708, 0.7854])
-            x_ee_des_base = x_ee_des[0]
-            x_ee_des = q_home
-            x_ee_des[0] = x_ee_des_base
+            # q_home = np.array([0.0, -0.7854, 0.0, -2.3562, 0.0, 1.5708, 0.7854])
+            # x_ee_des_base = x_ee_des[0]
+            # x_ee_des = q_home
+            # x_ee_des[0] = x_ee_des_base
         else:
             print("Warning: action buffer is empty, sending no-op action")
             return
         
 
         # publish the action
-        self.publishers["joint_pos_cmd"].write(
-            FR3JointPosCmd(
+        self.publishers["ee_pose_cmd"].write(
+            FR3EEPoseCmd(
                 t=self.t_session,
-                q_des=x_ee_des,
+                x_ee_des=x_ee_des,
+                absolute=True,
                 gripper=gripper_des,
             )
         )
