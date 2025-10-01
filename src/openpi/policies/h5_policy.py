@@ -40,7 +40,7 @@ class H5Inputs(transforms.DataTransformFn):
     """
 
     model_type: _model.ModelType
-    use_task_as_prompt: bool = True  # set False if you don't want to pass episode id as prompt
+    use_task_as_prompt: bool = True
 
     def __call__(self, data: dict) -> dict:
         base_image = _parse_image(_first(data, "image", "observation/image"))
