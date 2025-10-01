@@ -1,0 +1,17 @@
+# @package _global_
+defaults:
+  - /mhw_default
+  - /network: caltech_vulcan
+  - /nodes/pi_deploy
+  - /nodes/keyboard
+
+
+nodes:
+  pi_deployment_node:
+    domain_id: ${network.domain_id}
+    zed_settings:
+      serial_number: 33387783
+    oak_settings:
+      serial_number: "14442C10F1EC1CD000"
+  keyboard:
+    domain_id: ${network.domain_id}
