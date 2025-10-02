@@ -1,36 +1,6 @@
-# import h5py
-
-# def h5_tree(val, pre=''):
-#     items = len(val)
-#     for key, val in val.items():
-#         items -= 1
-#         if items == 0:
-#             # the last item
-#             if type(val) == h5py._hl.group.Group:
-#                 print(pre + '└── ' + key)
-#                 h5_tree(val, pre+'    ')
-#             else:
-#                 try:
-#                     print(pre + '└── ' + key + ' (%d)' % len(val))
-#                 except TypeError:
-#                     print(pre + '└── ' + key + ' (scalar)')
-#         else:
-#             if type(val) == h5py._hl.group.Group:
-#                 print(pre + '├── ' + key)
-#                 h5_tree(val, pre+'│   ')
-#             else:
-#                 try:
-#                     print(pre + '├── ' + key + ' (%d)' % len(val))
-#                 except TypeError:
-#                     print(pre + '├── ' + key + ' (scalar)')
-
-# data_path = "/overflow/dow/one_cup_rand_new_full_picks.h5"
-# f = h5py.File(data_path, "r")
-# h5_tree(f)
-# breakpoint()
-
 import io
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -79,7 +49,11 @@ def _get_image_shape(ds) -> Tuple[int, int, int]:
 
 
 def _read_image(ds, idx: int) -> np.ndarray:
-    return _safe_decode_image(ds[idx])
+    time_start = time.perf_counter()
+    sample_ret = _safe_decode_image(ds[idx])
+    time_end = time.perf_counter()
+    print(f"[debug] _read_image took {time_end - time_start:.3f}s")
+    return sample_ret
 
 
 def _list_episode_keys(f: h5py.File) -> List[str]:
@@ -199,8 +173,6 @@ def convert(args: Args) -> None:
 
     # Probe to build features dict
     third_shape, wrist_shape, fps, probed_third_serial = probe_shapes_and_fps(h5_paths, args.wrist_serial)
-    print(f"[probe] wrist shape: {wrist_shape}, third shape: {third_shape}, fps≈{fps:.3f}, "
-          f"example third cam serial: {probed_third_serial}")
 
     features = {
         "image": {  # third-person
@@ -233,7 +205,6 @@ def convert(args: Args) -> None:
         image_writer_threads=args.image_writer_threads,
         image_writer_processes=args.image_writer_processes,
     )
-
     # Iterate files/episodes and write frames
     for h5_path in h5_paths:
         print(f"[read] {h5_path}")
@@ -243,6 +214,7 @@ def convert(args: Args) -> None:
                 ep_keys = ep_keys[: args.limit_episodes]
 
             for ep in ep_keys:
+                t_ep_start = time.perf_counter()
                 g = f[ep]
                 cams = g["cams"]
                 cam_keys = list(cams.keys())
@@ -277,21 +249,89 @@ def convert(args: Args) -> None:
                 assert x_ee.shape[1] == 7 and x_ee_des.shape[1] == 7, \
                     f"{ep}: expected 7D x_ee, got {x_ee.shape[1]} and {x_ee_des.shape[1]}"
 
-                for i in range(N):
-                    obs_vec = np.concatenate([x_ee[i], np.array([grip_obs[i]], dtype=np.float32)], axis=0).astype(np.float32)
-                    act_vec = np.concatenate([x_ee_des[i], np.array([grip_act[i]], dtype=np.float32)], axis=0).astype(np.float32)
+                # Convert arrays to float32 once
+                x_ee = x_ee.astype(np.float32)
+                x_ee_des = x_ee_des.astype(np.float32)
+                grip_obs = grip_obs.astype(np.float32).reshape(-1, 1)
+                grip_act = grip_act.astype(np.float32).reshape(-1, 1)
 
-                    frame = {
-                        "image": _read_image(third_rgb, i),
-                        "wrist_image": _read_image(wrist_rgb, i),
-                        "state": obs_vec,
-                        "actions": act_vec,
-                        "task": "<control_mode> end effector </control_mode> Pick the clear cup up and center it on a peg in the blue receptacle."  # TODO: EXPOSE THIS
-                    }
-                    dataset.add_frame(frame)
+                obs_vecs = np.hstack([x_ee, grip_obs])
+                act_vecs = np.hstack([x_ee_des, grip_act])
 
+                task_description = "<control_mode> end effector </control_mode> Clear the dishwasher rack one item at a time and place the objects in the blue receptacle at different locations."
+
+                # -------- Instrumentation & Prefetch Strategy --------
+                def _is_raw_rgb(ds):
+                    return isinstance(ds, h5py.Dataset) and ds.dtype == np.uint8 and ds.ndim == 4 and ds.shape[1:] == (wrist_shape[0], wrist_shape[1], wrist_shape[2]) or ds.shape[1:] == (third_shape[0], third_shape[1], third_shape[2])
+
+                def _prefetch(ds, count):
+                    """
+                    Returns either:
+                      - ndarray of shape (count,H,W,3) (raw fast path)
+                      - list/array of encoded samples (bytes/uint8 arrays)
+                    """
+                    block = ds[:count]  # one bulk read
+                    return block
+
+                # Decide strategy: bulk read once (fastest) then iterate in memory
+                # This avoids per-frame h5 I/O which is dominating.
+                t_prefetch_start = time.perf_counter()
+                third_block = _prefetch(third_rgb, N)
+                wrist_block = _prefetch(wrist_rgb, N)
+                t_prefetch_end = time.perf_counter()
+                # Normalise access: define accessors that return uint8 HxWx3 arrays
+                def _materialize(sample):
+                    # fast path if already uint8 HxWx3
+                    if isinstance(sample, np.ndarray) and sample.ndim == 3 and sample.shape[-1] == 3 and sample.dtype == np.uint8:
+                        return sample
+                    return _safe_decode_image(sample)
+
+                # If blocks are ndarray of shape (N,H,W,3) we can skip decoding
+                third_is_raw = isinstance(third_block, np.ndarray) and third_block.ndim == 4 and third_block.shape[0] == N and third_block.shape[-1] == 3
+                wrist_is_raw = isinstance(wrist_block, np.ndarray) and wrist_block.ndim == 4 and wrist_block.shape[0] == N and wrist_block.shape[-1] == 3
+
+                t_frames_start = time.perf_counter()
+
+                # Optional: process in chunks to reduce peak memory if needed
+                CHUNK = 512  # tune if needed
+                for start in range(0, N, CHUNK):
+                    end = min(N, start + CHUNK)
+
+                    # Decode (if needed) this chunk
+                    if third_is_raw:
+                        third_imgs = third_block[start:end]
+                    else:
+                        third_imgs = [_materialize(third_block[i]) for i in range(start, end)]
+                    if wrist_is_raw:
+                        wrist_imgs = wrist_block[start:end]
+                    else:
+                        wrist_imgs = [_materialize(wrist_block[i]) for i in range(start, end)]
+
+                    # Add frames
+                    for local_idx in range(end - start):
+                        i = start + local_idx
+                        frame = {
+                            "image": third_imgs[local_idx],
+                            "wrist_image": wrist_imgs[local_idx],
+                            "state": obs_vecs[i],
+                            "actions": act_vecs[i],
+                            "task": task_description,
+                        }
+                        dataset.add_frame(frame)
+
+                t_frames_end = time.perf_counter()
+                # -------- End new loop --------
+
+                t_save_start = time.perf_counter()
                 dataset.save_episode()
+                t_save_end = time.perf_counter()
                 print(f"[write] saved episode {ep} with {N} frames")
+                print(f"[timing] episode {ep}: prefetch {(t_prefetch_end - t_prefetch_start):.3f}s, "
+                      f"frames {(t_frames_end - t_frames_start):.3f}s, "
+                      f"save {(t_save_end - t_save_start):.3f}s, total {(t_save_end - t_ep_start):.3f}s")
+
+        t_file_end = time.perf_counter()
+        print(f"[timing] file {h5_path}: {t_file_end-t_file_start:.3f}s")
 
     print(f"\nDone. Local LeRobot dataset saved at:\n  {out_dir}\n")
 
@@ -299,7 +339,6 @@ def convert(args: Args) -> None:
 def main():
     args = tyro.cli(Args)
     convert(args)
-
 
 if __name__ == "__main__":
     """Example command.
