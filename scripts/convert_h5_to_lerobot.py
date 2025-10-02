@@ -206,6 +206,7 @@ def convert(args: Args) -> None:
         image_writer_processes=args.image_writer_processes,
     )
     # Iterate files/episodes and write frames
+    t_file_start = time.perf_counter()
     for h5_path in h5_paths:
         print(f"[read] {h5_path}")
         with h5py.File(h5_path, "r") as f:
