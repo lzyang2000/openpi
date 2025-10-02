@@ -1013,11 +1013,11 @@ _CONFIGS = [
         name="pi05_dow_finetune",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=16, discrete_state_input=False),
         data=LeRobotDowDataConfig(
-            repo_id="local/one_cup_rand_new_full_picks",
+            repo_id="local/dow_dishwasher", #TODO need to expose
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
         ),
-        batch_size=64,
+        batch_size=96,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=10_000,
             peak_lr=5e-5,

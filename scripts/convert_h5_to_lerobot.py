@@ -103,7 +103,7 @@ def _infer_fps(timestamps: np.ndarray) -> float:
 @dataclass
 class Args:
     input_path: Path  # path to a .h5 file or a directory containing .h5 files
-    repo_name: str = "local/one_cup_rand_new_full_picks"
+    repo_name: str = "local/dow_dishwasher"
     wrist_serial: str = "14442C10F1EC1CD000"
     robot_type: str = "panda"     # 'panda' is appropriate for Franka/FR3
     image_writer_threads: int = 8
@@ -345,8 +345,8 @@ if __name__ == "__main__":
     """Example command.
 
     uv run python scripts/convert_h5_to_lerobot.py \
-        --input-path /overflow/dow/one_cup_rand_new_full_picks.h5 \
-        --repo-name local/one_cup_rand_new_full_picks \
+        --input-path /overflow/dow/local/dow_dishwasher.h5 \
+        --repo-name local/local/dow_dishwasher \
         --wrist-serial 14442C10F1EC1CD000
     """
     main()
