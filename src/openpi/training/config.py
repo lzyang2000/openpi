@@ -1028,6 +1028,8 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
+        save_interval=1000,
+        keep_period=1000,
         num_workers=4,
     ),
 ]
