@@ -41,6 +41,7 @@ class H5Inputs(transforms.DataTransformFn):
 
     model_type: _model.ModelType
     use_task_as_prompt: bool = True
+    wrist_only: bool = False
 
     def __call__(self, data: dict) -> dict:
         base_image = _parse_image(_first(data, "image", "observation/image"))
@@ -50,13 +51,13 @@ class H5Inputs(transforms.DataTransformFn):
         inputs = {
             "state": state,
             "image": {
-                "base_0_rgb": base_image,
+                "base_0_rgb": base_image if not self.wrist_only else np.zeros_like(base_image),
                 "left_wrist_0_rgb": wrist_image,
                 # Pad missing right wrist with zeros (same shape as base image).
                 "right_wrist_0_rgb": np.zeros_like(base_image),
             },
             "image_mask": {
-                "base_0_rgb": np.True_,
+                "base_0_rgb": np.True_ if not self.wrist_only else np.False_,
                 "left_wrist_0_rgb": np.True_,
                 # Mask padded views for PI0 only (not PI0-FAST), per OpenPi convention.
                 "right_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,

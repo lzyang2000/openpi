@@ -459,6 +459,7 @@ class LeRobotDowDataConfig(DataConfigFactory):
     """Custom config for Dow dataset in LeRobot format."""
 
     extra_delta_transform: bool = False  # absolute EE actions instead of deltas, but not easy to convert so ignore
+    wrist_only: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -477,7 +478,7 @@ class LeRobotDowDataConfig(DataConfigFactory):
         )
 
         data_transforms = _transforms.Group(
-            inputs=[h5_policy.H5Inputs(model_type=model_config.model_type)],
+            inputs=[h5_policy.H5Inputs(model_type=model_config.model_type, wrist_only=self.wrist_only)],
             outputs=[h5_policy.H5Outputs()],
         )
 
@@ -1013,9 +1014,10 @@ _CONFIGS = [
         name="pi05_dow_finetune",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=16, discrete_state_input=False),
         data=LeRobotDowDataConfig(
-            repo_id="local/dow_dishwasher", #TODO need to expose
+            repo_id="local/dow_dishwasher",  # TODO need to expose
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
+            wrist_only=True,
         ),
         batch_size=96,
         lr_schedule=_optimizer.CosineDecaySchedule(
@@ -1028,8 +1030,8 @@ _CONFIGS = [
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
-        save_interval=1000,
-        keep_period=1000,
+        save_interval=100,
+        keep_period=100,
         num_workers=4,
     ),
 ]
